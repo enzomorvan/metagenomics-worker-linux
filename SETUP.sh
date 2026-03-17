@@ -21,8 +21,8 @@ echo "============================================"
 echo ""
 
 # ---- Configuration (edit these or pass as env vars) -------------------------
-COORDINATOR_URL="${COORDINATOR_URL:-__COORDINATOR_URL__}"
-API_KEY="${API_KEY:-__API_KEY__}"
+COORDINATOR_URL="${COORDINATOR_URL:-http://194.164.206.175/compute}"
+API_KEY="${API_KEY:-jhyPOTYST8E_xyjEAyRJ1LWrMRoZeE33kV6fW9pgIQA}"
 WORKER_NAME="${WORKER_NAME:-$(hostname)}"
 THREADS="${THREADS:-$(nproc 2>/dev/null || echo 4)}"
 INSTALL_DIR="${HOME}/distributed_compute"
@@ -107,7 +107,7 @@ echo "[3/4] Setting up worker directory..."
 mkdir -p "${INSTALL_DIR}"
 
 # If coordinator URL is set, download worker files from it
-if [[ "${COORDINATOR_URL}" != "__COORDINATOR_URL__" ]]; then
+if [[ -n "${COORDINATOR_URL}" ]]; then
     echo "  Downloading worker files from coordinator..."
     for f in worker/__init__.py worker/worker.py worker/config.py worker/executor.py \
              worker/uploader.py worker/__main__.py process_sample_wrapper.sh; do

@@ -13,6 +13,6 @@ WORK_DIR = BASE_DIR / "workdir"
 LOGS_DIR = BASE_DIR / "logs"
 
 THREADS = int(os.environ.get("THREADS", "12"))
-MIN_DISK_GB = int(os.environ.get("MIN_DISK_GB", "30"))
+MIN_DISK_GB = int(os.environ.get("MIN_DISK_GB", "27"))
 POLL_INTERVAL_S = 30
 HEARTBEAT_INTERVAL_S = 60

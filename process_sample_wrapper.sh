@@ -86,32 +86,10 @@ echo ""
 STEP1_START=$(date +%s)
 echo "=== [${ACCESSION}] Step 1: Downloading reads ==="
 
-# Try SRA toolkit first, fall back to ENA direct download if it fails
-SRA_OK=0
-if command -v prefetch &>/dev/null && command -v fasterq-dump &>/dev/null; then
-    echo "  Trying SRA toolkit..."
-    if prefetch "${ACCESSION}" --output-directory "${WORK_DIR}" --max-size 50G 2>&1 | tail -5; then
-        SRA_FILE="${WORK_DIR}/${ACCESSION}/${ACCESSION}.sra"
-        # Check there's enough disk for conversion (need ~3x the .sra file size)
-        if [[ -f "${SRA_FILE}" ]]; then
-            SRA_SIZE=$(stat -c%s "${SRA_FILE}" 2>/dev/null || stat -f%z "${SRA_FILE}" 2>/dev/null)
-            AVAIL=$(df --output=avail "${WORK_DIR}" 2>/dev/null | tail -1)
-            AVAIL_BYTES=$((AVAIL * 1024))
-            NEEDED=$((SRA_SIZE * 3))
-            if [[ ${AVAIL_BYTES} -gt ${NEEDED} ]]; then
-                if fasterq-dump "${SRA_FILE}" --outdir "${WORK_DIR}" --split-3 --skip-technical --threads "${THREADS}" 2>&1 | tail -5; then
-                    SRA_OK=1
-                fi
-            else
-                echo "  Not enough disk for fasterq-dump (need ~$((NEEDED/1024/1024/1024))GB), falling back to ENA..."
-            fi
-        fi
-        rm -rf "${WORK_DIR}/${ACCESSION}"
-    fi
-fi
-
-# Fallback: stream FASTQ directly from ENA (downloads only what we need)
-if [[ ${SRA_OK} -eq 0 ]]; then
+# Try ENA streaming first (downloads only what we need), fall back to SRA toolkit
+ENA_OK=0
+{
+    echo "  Streaming from ENA (only first ${SUBSAMPLE_READS} reads per mate)..."
     echo "  Streaming from ENA (only first ${SUBSAMPLE_READS} reads per mate)..."
     ENA_RESP=$(curl -sf "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=fastq_ftp" 2>/dev/null)
     if [[ -z "${ENA_RESP}" ]]; then
@@ -152,6 +130,33 @@ if [[ ${SRA_OK} -eq 0 ]]; then
             head -n ${MIN_LINES} "${WORK_DIR}/${ACCESSION}_2.fastq" > "${WORK_DIR}/${ACCESSION}_2.fastq.tmp"
             mv "${WORK_DIR}/${ACCESSION}_2.fastq.tmp" "${WORK_DIR}/${ACCESSION}_2.fastq"
         fi
+    fi
+    ENA_OK=1
+} || true
+
+# Fallback: SRA toolkit if ENA streaming failed
+if [[ ${ENA_OK} -eq 0 ]]; then
+    echo "  ENA streaming failed, trying SRA toolkit..."
+    if command -v prefetch &>/dev/null && command -v fasterq-dump &>/dev/null; then
+        if prefetch "${ACCESSION}" --output-directory "${WORK_DIR}" --max-size 50G 2>&1 | tail -5; then
+            SRA_FILE="${WORK_DIR}/${ACCESSION}/${ACCESSION}.sra"
+            if [[ -f "${SRA_FILE}" ]]; then
+                SRA_SIZE=$(stat -c%s "${SRA_FILE}" 2>/dev/null || stat -f%z "${SRA_FILE}" 2>/dev/null)
+                AVAIL=$(df --output=avail "${WORK_DIR}" 2>/dev/null | tail -1)
+                AVAIL_BYTES=$((AVAIL * 1024))
+                NEEDED=$((SRA_SIZE * 3))
+                if [[ ${AVAIL_BYTES} -gt ${NEEDED} ]]; then
+                    fasterq-dump "${SRA_FILE}" --outdir "${WORK_DIR}" --split-3 --skip-technical --threads "${THREADS}" 2>&1 | tail -5
+                else
+                    echo "  Not enough disk for fasterq-dump (need ~$((NEEDED/1024/1024/1024))GB)"
+                    exit 1
+                fi
+            fi
+            rm -rf "${WORK_DIR}/${ACCESSION}"
+        fi
+    else
+        echo "ERROR: Neither ENA nor SRA toolkit available"
+        exit 1
     fi
 fi
 

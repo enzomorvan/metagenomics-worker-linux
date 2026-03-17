@@ -54,7 +54,7 @@ FUNC_MAP="${DB_DIR}/functional_db/functional_db_id2gene.map"
 # ---- dependency check -------------------------------------------------------
 echo "=== [${ACCESSION}] Checking dependencies ==="
 MISSING=0
-for tool in prefetch fasterq-dump fastp diamond; do
+for tool in fastp diamond; do
     if ! command -v "$tool" &>/dev/null; then
         echo "ERROR: $tool not found in PATH."
         MISSING=1
@@ -86,18 +86,12 @@ echo ""
 STEP1_START=$(date +%s)
 echo "=== [${ACCESSION}] Step 1: Downloading reads ==="
 
-# Try ENA streaming first (downloads only what we need), fall back to SRA toolkit
+# Try ENA streaming first (downloads only what we need ~100MB vs full file ~10-100GB)
 ENA_OK=0
-{
-    echo "  Streaming from ENA (only first ${SUBSAMPLE_READS} reads per mate)..."
-    echo "  Streaming from ENA (only first ${SUBSAMPLE_READS} reads per mate)..."
-    ENA_RESP=$(curl -sf "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=fastq_ftp" 2>/dev/null)
-    if [[ -z "${ENA_RESP}" ]]; then
-        echo "ERROR: Could not fetch ENA metadata for ${ACCESSION}"
-        exit 1
-    fi
+echo "  Streaming from ENA (only first ${SUBSAMPLE_READS} reads per mate)..."
+ENA_RESP=$(curl -sf "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=fastq_ftp" 2>/dev/null)
+if [[ -n "${ENA_RESP}" ]]; then
     ENA_URLS=$(echo "${ENA_RESP}" | tail -1 | cut -f2 | tr ';' ' ')
-    # Download extra reads to account for fastp filtering (~20% loss)
     STREAM_LINES=$(( SUBSAMPLE_READS * 4 * 2 ))
     for URL in ${ENA_URLS}; do
         FNAME=$(basename "${URL}" .gz)
@@ -105,10 +99,9 @@ ENA_OK=0
         curl -sf "https://${URL}" | gunzip -c | head -n ${STREAM_LINES} > "${WORK_DIR}/${FNAME}" || true
         FLINES=$(wc -l < "${WORK_DIR}/${FNAME}")
         if [[ ${FLINES} -lt 4 ]]; then
-            echo "  ERROR: ${FNAME} is empty or failed to download"
-            exit 1
+            echo "  WARNING: ${FNAME} is empty or failed"
+            break
         fi
-        # Truncate to complete FASTQ records (multiple of 4 lines)
         FLINES_CLEAN=$(( (FLINES / 4) * 4 ))
         if [[ ${FLINES_CLEAN} -lt ${FLINES} ]]; then
             head -n ${FLINES_CLEAN} "${WORK_DIR}/${FNAME}" > "${WORK_DIR}/${FNAME}.tmp"
@@ -132,12 +125,12 @@ ENA_OK=0
         fi
     fi
     ENA_OK=1
-} || true
+fi
 
 # Fallback: SRA toolkit if ENA streaming failed
 if [[ ${ENA_OK} -eq 0 ]]; then
-    echo "  ENA streaming failed, trying SRA toolkit..."
     if command -v prefetch &>/dev/null && command -v fasterq-dump &>/dev/null; then
+        echo "  ENA failed, trying SRA toolkit..."
         if prefetch "${ACCESSION}" --output-directory "${WORK_DIR}" --max-size 50G 2>&1 | tail -5; then
             SRA_FILE="${WORK_DIR}/${ACCESSION}/${ACCESSION}.sra"
             if [[ -f "${SRA_FILE}" ]]; then
@@ -148,14 +141,14 @@ if [[ ${ENA_OK} -eq 0 ]]; then
                 if [[ ${AVAIL_BYTES} -gt ${NEEDED} ]]; then
                     fasterq-dump "${SRA_FILE}" --outdir "${WORK_DIR}" --split-3 --skip-technical --threads "${THREADS}" 2>&1 | tail -5
                 else
-                    echo "  Not enough disk for fasterq-dump (need ~$((NEEDED/1024/1024/1024))GB)"
+                    echo "ERROR: Not enough disk for fasterq-dump (need ~$((NEEDED/1024/1024/1024))GB)"
                     exit 1
                 fi
             fi
             rm -rf "${WORK_DIR}/${ACCESSION}"
         fi
     else
-        echo "ERROR: Neither ENA nor SRA toolkit available"
+        echo "ERROR: ENA streaming failed and SRA toolkit not available"
         exit 1
     fi
 fi

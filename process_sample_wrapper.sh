@@ -92,6 +92,10 @@ echo "  Streaming from ENA (only first ${SUBSAMPLE_READS} reads per mate)..."
 ENA_RESP=$(curl -sf "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=fastq_ftp" 2>/dev/null)
 if [[ -n "${ENA_RESP}" ]]; then
     ENA_URLS=$(echo "${ENA_RESP}" | tail -1 | cut -f2 | tr ';' ' ')
+    if [[ -z "${ENA_URLS}" ]]; then
+        echo "  No FASTQ URLs on ENA for ${ACCESSION}"
+        ENA_OK=-1
+    fi
     STREAM_LINES=$(( SUBSAMPLE_READS * 4 * 2 ))
     for URL in ${ENA_URLS}; do
         FNAME=$(basename "${URL}" .gz)

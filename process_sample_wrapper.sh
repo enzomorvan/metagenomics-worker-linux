@@ -167,6 +167,11 @@ echo "  Download time: $(( STEP1_END - STEP1_START ))s"
 if [[ -f "${WORK_DIR}/${ACCESSION}_1.fastq" ]] && [[ -f "${WORK_DIR}/${ACCESSION}_2.fastq" ]]; then
     LAYOUT="paired"
     echo "  Layout: paired-end"
+elif [[ -f "${WORK_DIR}/${ACCESSION}_1.fastq" ]] && [[ ! -f "${WORK_DIR}/${ACCESSION}_2.fastq" ]]; then
+    # Single-end sample with _1 suffix (common on ENA)
+    mv "${WORK_DIR}/${ACCESSION}_1.fastq" "${WORK_DIR}/${ACCESSION}.fastq"
+    LAYOUT="single"
+    echo "  Layout: single-end (renamed from _1)"
 else
     LAYOUT="single"
     if [[ -f "${WORK_DIR}/${ACCESSION}.fastq" ]]; then

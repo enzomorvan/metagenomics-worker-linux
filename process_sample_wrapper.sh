@@ -100,6 +100,8 @@ if [[ -n "${ENA_RESP}" ]]; then
         FLINES=$(wc -l < "${WORK_DIR}/${FNAME}")
         if [[ ${FLINES} -lt 4 ]]; then
             echo "  WARNING: ${FNAME} is empty or failed"
+            rm -f "${WORK_DIR}/${FNAME}"
+            ENA_OK=-1
             break
         fi
         FLINES_CLEAN=$(( (FLINES / 4) * 4 ))
@@ -124,7 +126,9 @@ if [[ -n "${ENA_RESP}" ]]; then
             mv "${WORK_DIR}/${ACCESSION}_2.fastq.tmp" "${WORK_DIR}/${ACCESSION}_2.fastq"
         fi
     fi
-    ENA_OK=1
+    if [[ ${ENA_OK} -ne -1 ]]; then
+        ENA_OK=1
+    fi
 fi
 
 # Fallback: SRA toolkit if ENA streaming failed

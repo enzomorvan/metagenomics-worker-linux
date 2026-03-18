@@ -4,6 +4,7 @@ import signal
 import shutil
 import subprocess
 import time
+import zlib
 from pathlib import Path
 
 from . import config
@@ -188,14 +189,14 @@ def _run_native_windows(accession: str) -> tuple[bool, int, str, dict | None]:
 
             _timings = {}
 
-            # Step 1: Download FASTQ from ENA (direct HTTP, no SRA toolkit needed)
+            # Step 1: Download FASTQ from ENA (stream-decompress, subsample during download)
             log.write(f"=== [{accession}] Step 1: Downloading from ENA ===\n")
             _t = time.time()
-            r1, r2, se, paired = _download_from_ena(accession, work, log)
+            r1, r2, se, paired = _download_from_ena(accession, work, log, max_reads=SUBSAMPLE_READS)
             _timings["download"] = int(time.time() - _t)
             log.write(f"  Download time: {_timings['download']}s\n")
 
-            # Step 2: QC
+            # Step 2: QC (inputs are already uncompressed .fastq and pre-subsampled)
             _t = time.time()
             trimmed = work / f"{accession}_trimmed.fastq"
             has_fastp = shutil.which(fastp_bin) is not None
@@ -213,8 +214,7 @@ def _run_native_windows(accession: str) -> tuple[bool, int, str, dict | None]:
                          "--html", os.devnull])
                     r1.unlink(missing_ok=True)
                     r2.unlink(missing_ok=True)
-                    sub_lines = SUBSAMPLE_READS * 4
-                    _head_concat(t1, t2, trimmed, sub_lines)
+                    _concat(t1, t2, trimmed)
                     t1.unlink(missing_ok=True)
                     t2.unlink(missing_ok=True)
                 else:
@@ -224,8 +224,6 @@ def _run_native_windows(accession: str) -> tuple[bool, int, str, dict | None]:
                          "--json", str(work / f"{accession}_fastp.json"),
                          "--html", os.devnull])
                     se.unlink(missing_ok=True)
-                    sub_lines = SUBSAMPLE_READS * 2 * 4
-                    _head_inplace(trimmed, sub_lines)
             else:
                 # Use cutadapt as fallback (available on Windows via pip)
                 log.write(f"\n=== [{accession}] Step 2: Quality trimming with cutadapt ===\n")
@@ -261,8 +259,7 @@ def _run_native_windows(accession: str) -> tuple[bool, int, str, dict | None]:
                             str(r1), str(r2)])
                         r1.unlink(missing_ok=True)
                         r2.unlink(missing_ok=True)
-                        sub_lines = SUBSAMPLE_READS * 4
-                        _head_concat(t1, t2, trimmed, sub_lines)
+                        _concat(t1, t2, trimmed)
                         t1.unlink(missing_ok=True)
                         t2.unlink(missing_ok=True)
                     else:
@@ -272,38 +269,15 @@ def _run_native_windows(accession: str) -> tuple[bool, int, str, dict | None]:
                             "-q", "20", "-m", "50",
                             "-o", str(trimmed), str(se)])
                         se.unlink(missing_ok=True)
-                        sub_lines = SUBSAMPLE_READS * 2 * 4
-                        _head_inplace(trimmed, sub_lines)
                 else:
-                    # Last resort: decompress and subsample raw reads
-                    import gzip as _gzip
-                    log.write("  WARNING: No QC tool available, decompressing and subsampling raw reads\n")
+                    # Last resort: just concatenate/rename raw files (already uncompressed .fastq)
+                    log.write("  WARNING: No QC tool available, using raw reads\n")
                     if paired:
-                        r1_fq, r2_fq = work / f"{accession}_1.fastq", work / f"{accession}_2.fastq"
-                        for gz, fq in [(r1, r1_fq), (r2, r2_fq)]:
-                            with _gzip.open(gz, "rb") as gi, open(fq, "wb") as fo:
-                                while True:
-                                    chunk = gi.read(4 * 1024 * 1024)
-                                    if not chunk:
-                                        break
-                                    fo.write(chunk)
-                            gz.unlink()
-                        sub_lines = SUBSAMPLE_READS * 4
-                        _head_concat(r1_fq, r2_fq, trimmed, sub_lines)
-                        r1_fq.unlink(missing_ok=True)
-                        r2_fq.unlink(missing_ok=True)
+                        _concat(r1, r2, trimmed)
+                        r1.unlink(missing_ok=True)
+                        r2.unlink(missing_ok=True)
                     else:
-                        se_fq = work / f"{accession}.fastq"
-                        with _gzip.open(se, "rb") as gi, open(se_fq, "wb") as fo:
-                            while True:
-                                chunk = gi.read(4 * 1024 * 1024)
-                                if not chunk:
-                                    break
-                                fo.write(chunk)
-                        se.unlink()
-                        sub_lines = SUBSAMPLE_READS * 2 * 4
-                        _head_inplace(se_fq, sub_lines)
-                        se_fq.rename(trimmed)
+                        se.rename(trimmed)
 
             total_reads = sum(1 for _ in open(trimmed, "r")) // 4
             _timings["qc"] = int(time.time() - _t)
@@ -326,7 +300,7 @@ def _run_native_windows(accession: str) -> tuple[bool, int, str, dict | None]:
                 counts_file = results / f"{accession}_{prefix}_counts.tsv"
 
                 if not db_path.exists():
-                    log.write(f"\n  WARNING: {name} not found — skipping.\n")
+                    log.write(f"\n  WARNING: {name} not found -- skipping.\n")
                     counts_file.write_text("gene_family\thit_count\n")
                     hit_totals[prefix] = 0
                     continue
@@ -373,13 +347,183 @@ def _run_native_windows(accession: str) -> tuple[bool, int, str, dict | None]:
         return False, int(time.time() - start), error, None
 
 
-def _download_from_ena(accession: str, work: Path, log) -> tuple[Path, Path, Path, bool]:
+def _count_gz_reads(gz_path: Path) -> int:
+    """Count how many complete FASTQ reads are in a (possibly truncated) .gz file."""
+    line_count = 0
+    decompressor = zlib.decompressobj(wbits=31)
+    try:
+        with open(gz_path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                try:
+                    data = decompressor.decompress(chunk)
+                except Exception:
+                    break  # truncated gzip
+                line_count += data.count(b"\n")
+    except Exception:
+        pass
+    return line_count // 4
+
+
+def _download_with_resume(url: str, dest: Path, log, max_retries: int = 50,
+                          retry_delay: int = 5, stall_timeout: int = 30,
+                          max_reads: int = 0):
+    """Download a file via HTTP with automatic resume on connection failure.
+
+    Uses HTTP Range requests to continue from where the previous attempt
+    left off, so no data is re-downloaded.  A stall watchdog closes the
+    connection if no data arrives within *stall_timeout* seconds.
+
+    If *max_reads* > 0, the function streams-decompresses the gzip data
+    in memory while downloading and stops once enough reads have been
+    counted.  The file on disk will be a valid (possibly truncated) gzip.
+    """
+    import requests
+    import threading
+
+    for attempt in range(1, max_retries + 1):
+        already = dest.stat().st_size if dest.exists() else 0
+
+        # If we have data, check if it already contains enough reads
+        if already > 0 and max_reads > 0:
+            cnt = _count_gz_reads(dest)
+            if cnt >= max_reads:
+                log.write(f"  Already have {cnt} reads from {already//(1024*1024)} MB\n")
+                log.flush()
+                return
+
+        headers = {}
+        if already > 0:
+            headers["Range"] = f"bytes={already}-"
+
+        resp = None
+        stall_timer = None
+
+        def _kill_stalled():
+            """Called by timer when download stalls."""
+            nonlocal resp
+            try:
+                if resp and resp.raw and resp.raw._fp and resp.raw._fp.fp:
+                    resp.raw._fp.fp.close()
+            except Exception:
+                pass
+
+        stopped_early = False
+        # Running line counter for early stop (only when downloading from byte 0)
+        decomp = None
+        line_count_running = 0
+        if max_reads > 0 and already == 0:
+            decomp = zlib.decompressobj(wbits=31)
+
+        try:
+            resp = requests.get(url, stream=True, timeout=(15, 30), headers=headers)
+            if already > 0 and resp.status_code == 416:
+                resp.close()
+                return  # file already complete
+            resp.raise_for_status()
+
+            if already > 0 and resp.status_code == 200:
+                already = 0
+                # Server ignored Range -- restart decompressor
+                if max_reads > 0:
+                    decomp = zlib.decompressobj(wbits=31)
+                    line_count_running = 0
+            if resp.status_code == 206:
+                total_size = already + int(resp.headers.get("content-length", 0))
+            else:
+                total_size = int(resp.headers.get("content-length", 0))
+
+            downloaded = already
+            last_mb_shown = already // (1024 * 1024)
+            mode = "ab" if already > 0 and resp.status_code == 206 else "wb"
+            with open(dest, mode) as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    # Cancel previous watchdog, start a new one
+                    if stall_timer:
+                        stall_timer.cancel()
+                    stall_timer = threading.Timer(stall_timeout, _kill_stalled)
+                    stall_timer.daemon = True
+                    stall_timer.start()
+
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    mb = downloaded // (1024 * 1024)
+                    if total_size > 0 and mb > last_mb_shown:
+                        last_mb_shown = mb
+                        pct = downloaded * 100 // total_size
+                        total_mb = total_size // (1024 * 1024)
+                        log.write(f"\r  {dest.name}: {mb}/{total_mb} MB ({pct}%)")
+                        log.flush()
+
+                    # Inline read counting for early stop
+                    if decomp is not None:
+                        try:
+                            decompressed = decomp.decompress(chunk)
+                            line_count_running += decompressed.count(b"\n")
+                        except Exception:
+                            decomp = None  # decompressor broken, stop counting
+
+                        if line_count_running // 4 >= max_reads:
+                            stopped_early = True
+                            log.write(f"\n  Have ~{line_count_running // 4} reads at {mb} MB -- stopping download\n")
+                            log.flush()
+                            break
+
+            if stall_timer:
+                stall_timer.cancel()
+            if stopped_early:
+                try:
+                    resp.raw._fp.fp.close()
+                except Exception:
+                    pass
+            try:
+                resp.close()
+            except Exception:
+                pass
+            if not stopped_early and total_size > 0:
+                log.write("\n")
+            log.flush()
+            return  # success
+
+        except Exception:
+            if stall_timer:
+                stall_timer.cancel()
+            try:
+                if resp:
+                    resp.close()
+            except Exception:
+                pass
+            already_now = dest.stat().st_size if dest.exists() else 0
+            # Check if we have enough despite the connection drop
+            if already_now > 0 and max_reads > 0:
+                cnt = _count_gz_reads(dest)
+                if cnt >= max_reads:
+                    log.write(f"\n  Connection lost at {already_now // (1024*1024)} MB "
+                              f"but have {cnt} reads -- proceeding\n")
+                    log.flush()
+                    return
+            if attempt < max_retries:
+                log.write(f"\n  Connection lost at {already_now // (1024*1024)} MB "
+                          f"(attempt {attempt}/{max_retries}), resuming in {retry_delay}s...\n")
+                log.flush()
+                time.sleep(retry_delay)
+            else:
+                log.write(f"\n  Download failed after {max_retries} attempts\n")
+                log.flush()
+                raise
+
+
+def _download_from_ena(accession: str, work: Path, log, max_reads: int = 0) -> tuple[Path, Path, Path, bool]:
     """Download FASTQ files directly from ENA via HTTP.
+
+    When max_reads > 0, stream-decompress gzip on the fly and truncate to
+    max_reads per mate.  Output files are uncompressed .fastq.
 
     Returns (r1, r2, se, paired). For paired-end, r1 and r2 are set.
     For single-end, se is set.
     """
-    import gzip
     import requests
 
     # Query ENA API for FASTQ URLs
@@ -399,41 +543,108 @@ def _download_from_ena(accession: str, work: Path, log) -> tuple[Path, Path, Pat
     ftp_field = lines[1].split("\t")[1]
     urls = [u.strip() for u in ftp_field.split(";") if u.strip()]
 
-    # Download each file (keep as .gz — cutadapt and DIAMOND read gzip natively)
+    MAX_RETRIES = 50
+    RETRY_DELAY = 5  # seconds between retries
+
     for url in urls:
         http_url = "https://" + url
         filename = url.split("/")[-1]
         gz_path = work / filename
-        log.write(f"  Downloading {filename}...\n")
-        log.flush()
 
-        with requests.get(http_url, stream=True, timeout=30) as r:
-            r.raise_for_status()
-            total_size = int(r.headers.get("content-length", 0))
-            downloaded = 0
-            with open(gz_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        pct = downloaded * 100 // total_size
-                        mb = downloaded // (1024 * 1024)
-                        total_mb = total_size // (1024 * 1024)
-                        log.write(f"\r  {filename}: {mb}/{total_mb} MB ({pct}%)")
-                        log.flush()
-            if total_size > 0:
-                log.write("\n")
+        if max_reads > 0:
+            # Download compressed file with resume + early stop, then decompress/subsample.
+            out_name = filename.replace(".fastq.gz", ".fastq")
+            out_path = work / out_name
+            max_lines = max_reads * 4
+            log.write(f"  Downloading {filename} (limit {max_reads} reads)...\n")
+            log.flush()
 
-    r1 = work / f"{accession}_1.fastq.gz"
-    r2 = work / f"{accession}_2.fastq.gz"
-    se = work / f"{accession}.fastq.gz"
+            _download_with_resume(http_url, gz_path, log, MAX_RETRIES, RETRY_DELAY,
+                                  max_reads=max_reads)
 
-    paired = r1.exists() and r2.exists()
-    if not paired and not se.exists():
-        for f in work.glob("*.fastq.gz"):
-            if f.name != r1.name and f.name != r2.name:
-                f.rename(se)
-                break
+            # Now decompress and subsample locally from the .gz file.
+            # Write in large chunks (not line-by-line) for performance.
+            log.write(f"  Decompressing and subsampling to {max_reads} reads...\n")
+            log.flush()
+
+            line_count = 0
+            decompressor = zlib.decompressobj(wbits=31)
+            leftover = b""
+
+            with open(gz_path, "rb") as gz_f, open(out_path, "wb") as out_f:
+                while True:
+                    chunk = gz_f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    try:
+                        decompressed = decompressor.decompress(chunk)
+                    except Exception:
+                        break  # truncated gzip is OK, we got partial data
+                    data = leftover + decompressed
+                    leftover = b""
+
+                    nlines = data.count(b"\n")
+                    remaining = max_lines - line_count
+
+                    if nlines <= remaining:
+                        # Write whole chunk up to last newline (keep partial line as leftover)
+                        last_nl = data.rfind(b"\n")
+                        if last_nl >= 0:
+                            out_f.write(data[:last_nl + 1])
+                            leftover = data[last_nl + 1:]
+                            line_count += nlines
+                        else:
+                            leftover = data
+                    else:
+                        # Find exact cutoff at the Nth newline
+                        pos = 0
+                        for _ in range(remaining):
+                            nl = data.find(b"\n", pos)
+                            if nl == -1:
+                                break
+                            pos = nl + 1
+                            line_count += 1
+                        out_f.write(data[:pos])
+                        break
+
+                    if line_count >= max_lines:
+                        break
+
+            gz_path.unlink(missing_ok=True)
+            kept = line_count // 4
+            if kept >= max_reads:
+                log.write(f"  Kept {kept} reads (subsampled)\n")
+            else:
+                log.write(f"  File had {kept} reads total (less than limit)\n")
+        else:
+            # Download full compressed file with resume
+            log.write(f"  Downloading {filename}...\n")
+            log.flush()
+            _download_with_resume(http_url, gz_path, log, MAX_RETRIES, RETRY_DELAY)
+
+    # Determine layout -- check for .fastq files if subsampled, .fastq.gz otherwise
+    if max_reads > 0:
+        r1 = work / f"{accession}_1.fastq"
+        r2 = work / f"{accession}_2.fastq"
+        se = work / f"{accession}.fastq"
+
+        paired = r1.exists() and r2.exists()
+        if not paired and not se.exists():
+            for f in work.glob("*.fastq"):
+                if f.name != r1.name and f.name != r2.name:
+                    f.rename(se)
+                    break
+    else:
+        r1 = work / f"{accession}_1.fastq.gz"
+        r2 = work / f"{accession}_2.fastq.gz"
+        se = work / f"{accession}.fastq.gz"
+
+        paired = r1.exists() and r2.exists()
+        if not paired and not se.exists():
+            for f in work.glob("*.fastq.gz"):
+                if f.name != r1.name and f.name != r2.name:
+                    f.rename(se)
+                    break
 
     if not paired and not se.exists():
         raise RuntimeError(f"No FASTQ files produced for {accession}")
@@ -441,6 +652,19 @@ def _download_from_ena(accession: str, work: Path, log) -> tuple[Path, Path, Pat
     layout = "paired-end" if paired else "single-end"
     log.write(f"  Layout: {layout}\n")
     return r1, r2, se, paired
+
+
+def _concat(f1: Path, f2: Path, out: Path):
+    """Concatenate two files using binary read/write in 4MB chunks."""
+    chunk_size = 4 * 1024 * 1024
+    with open(out, "wb") as o:
+        for src in [f1, f2]:
+            with open(src, "rb") as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    o.write(chunk)
 
 
 def _head_concat(f1: Path, f2: Path, out: Path, max_lines: int):

@@ -86,6 +86,14 @@ echo ""
 STEP1_START=$(date +%s)
 echo "=== [${ACCESSION}] Step 1: Downloading reads ==="
 
+# Check if FASTQ files were pre-downloaded (prefetch by worker)
+PREFETCHED=0
+if [[ -f "${WORK_DIR}/${ACCESSION}_1.fastq" ]] || [[ -f "${WORK_DIR}/${ACCESSION}.fastq" ]]; then
+    echo "  Using pre-downloaded FASTQ files (prefetched)"
+    PREFETCHED=1
+fi
+
+if [[ ${PREFETCHED} -eq 0 ]]; then
 # Try ENA streaming first (downloads only what we need ~100MB vs full file ~10-100GB)
 ENA_OK=0
 echo "  Streaming from ENA (only first ${SUBSAMPLE_READS} reads per mate)..."
@@ -160,6 +168,8 @@ if [[ ${ENA_OK} -ne 1 ]]; then
         exit 1
     fi
 fi
+
+fi  # end of PREFETCHED check
 
 STEP1_END=$(date +%s)
 echo "  Download time: $(( STEP1_END - STEP1_START ))s"

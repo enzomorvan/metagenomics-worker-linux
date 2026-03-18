@@ -14,7 +14,7 @@ import time
 
 from . import config
 from . import uploader
-from .executor import run_sample, collect_result_files
+from .executor import run_sample, collect_result_files, prefetch_sample
 
 _shutdown = threading.Event()
 _lock_file = None
@@ -116,6 +116,9 @@ def main():
     print("Entering poll loop (Ctrl+C to stop after current task)...")
     print()
 
+    _prefetch_thread = None
+    _next_task = None
+
     while not _shutdown.is_set():
         # Heartbeat + check if enabled
         enabled = uploader.send_heartbeat(worker_id)
@@ -140,13 +143,17 @@ def main():
             _shutdown.wait(config.POLL_INTERVAL_S)
             continue
 
-        # Claim task
-        try:
-            task = uploader.claim_task(worker_id)
-        except Exception as e:
-            print(f"Failed to claim task: {e}")
-            _shutdown.wait(config.POLL_INTERVAL_S)
-            continue
+        # Use prefetched task if available, otherwise claim new
+        if _next_task:
+            task = _next_task
+            _next_task = None
+        else:
+            try:
+                task = uploader.claim_task(worker_id)
+            except Exception as e:
+                print(f"Failed to claim task: {e}")
+                _shutdown.wait(config.POLL_INTERVAL_S)
+                continue
 
         if not task:
             _shutdown.wait(config.POLL_INTERVAL_S)
@@ -164,8 +171,30 @@ def main():
         )
         hb_thread.start()
 
+        # Claim and prefetch next task in background
+        _next_task = None
+        _prefetch_thread = None
+        if not _shutdown.is_set():
+            try:
+                _next_task = uploader.claim_task(worker_id)
+                if _next_task:
+                    next_acc = _next_task["accession"]
+                    print(f"  (prefetching next: {next_acc})")
+                    _prefetch_thread = threading.Thread(
+                        target=prefetch_sample,
+                        args=(next_acc,),
+                        daemon=True,
+                    )
+                    _prefetch_thread.start()
+            except Exception:
+                pass  # prefetch is best-effort
+
         # Execute
         success, duration_s, error, step_timings = run_sample(accession)
+
+        # Wait for prefetch to finish if still running
+        if _prefetch_thread and _prefetch_thread.is_alive():
+            _prefetch_thread.join(timeout=30)
 
         if success:
             print(f"  Completed in {duration_s // 60}m {duration_s % 60}s")

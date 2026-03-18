@@ -11,7 +11,7 @@
 #   WORK_DIR    - Temporary working directory for this sample
 #   THREADS     - Number of threads for DIAMOND/fastp (default: 12)
 # =============================================================================
-set -euo pipefail
+set -eu
 
 # ---- argument / env parsing -------------------------------------------------
 ACCESSION="${ACCESSION:-${1:-}}"

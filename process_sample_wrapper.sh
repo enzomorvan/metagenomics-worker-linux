@@ -147,7 +147,7 @@ if [[ ${ENA_OK} -ne 1 ]]; then
                 AVAIL_BYTES=$((AVAIL * 1024))
                 NEEDED=$((SRA_SIZE * 3))
                 if [[ ${AVAIL_BYTES} -gt ${NEEDED} ]]; then
-                    fasterq-dump "${SRA_FILE}" --outdir "${WORK_DIR}" --split-3 --skip-technical --threads "${THREADS}" 2>&1 | tail -5
+                    fasterq-dump "${SRA_FILE}" --outdir "${WORK_DIR}" --temp "${WORK_DIR}" --split-3 --skip-technical --threads "${THREADS}" 2>&1 | tail -5
                 else
                     echo "ERROR: Not enough disk for fasterq-dump (need ~$((NEEDED/1024/1024/1024))GB)"
                     exit 1

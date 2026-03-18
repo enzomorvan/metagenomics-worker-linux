@@ -136,7 +136,7 @@ if [[ -n "${ENA_RESP}" ]]; then
 fi
 
 # Fallback: SRA toolkit if ENA streaming failed
-if [[ ${ENA_OK} -eq 0 ]]; then
+if [[ ${ENA_OK} -ne 1 ]]; then
     if command -v prefetch &>/dev/null && command -v fasterq-dump &>/dev/null; then
         echo "  ENA failed, trying SRA toolkit..."
         if prefetch "${ACCESSION}" --output-directory "${WORK_DIR}" --max-size 50G 2>&1 | tail -5; then

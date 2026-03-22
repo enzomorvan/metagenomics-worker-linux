@@ -9,88 +9,6 @@ from pathlib import Path
 from . import config
 
 WRAPPER_SCRIPT = Path(__file__).resolve().parent.parent / "process_sample_wrapper.sh"
-SUBSAMPLE_READS = 2500000
-
-
-def prefetch_sample(accession: str):
-    """Pre-download FASTQ files for a sample via ENA streaming.
-
-    Downloads to the workdir so the bash wrapper can skip its download step.
-    Runs in a background thread — errors are silently ignored (wrapper will
-    download if prefetch failed).
-    """
-    import requests
-
-    work = config.WORK_DIR / f"tmp_{accession}"
-    work.mkdir(parents=True, exist_ok=True)
-
-    # Check if already downloaded
-    if any(work.glob(f"{accession}*.fastq")):
-        return
-
-    try:
-        resp = requests.get(
-            f"https://www.ebi.ac.uk/ena/portal/api/filereport"
-            f"?accession={accession}&result=read_run&fields=fastq_ftp",
-            timeout=30,
-        )
-        resp.raise_for_status()
-        lines = resp.text.strip().split("\n")
-        if len(lines) < 2:
-            return
-        ftp_field = lines[1].split("\t")[1]
-        urls = [u.strip() for u in ftp_field.split(";") if u.strip()]
-        if not urls:
-            return
-
-        stream_lines = SUBSAMPLE_READS * 4 * 2
-        for url in urls:
-            filename = url.split("/")[-1].replace(".gz", "")
-            out_path = work / filename
-            if out_path.exists():
-                continue
-            http_url = "https://" + url
-            proc = subprocess.Popen(
-                f'curl -sf "{http_url}" | gunzip -c | head -n {stream_lines}',
-                shell=True, stdout=open(out_path, "w"), stderr=subprocess.DEVNULL,
-            )
-            proc.wait()
-            # Truncate to complete FASTQ records
-            with open(out_path) as f:
-                total = sum(1 for _ in f)
-            clean = (total // 4) * 4
-            if clean < 4:
-                out_path.unlink(missing_ok=True)
-                continue
-            if clean < total:
-                subprocess.run(
-                    f'head -n {clean} "{out_path}" > "{out_path}.tmp" && mv "{out_path}.tmp" "{out_path}"',
-                    shell=True,
-                )
-
-        # Equalize paired-end mates
-        r1 = work / f"{accession}_1.fastq"
-        r2 = work / f"{accession}_2.fastq"
-        if r1.exists() and r2.exists():
-            with open(r1) as f:
-                r1_lines = sum(1 for _ in f)
-            with open(r2) as f:
-                r2_lines = sum(1 for _ in f)
-            if r1_lines != r2_lines:
-                min_lines = min(r1_lines, r2_lines)
-                min_lines = (min_lines // 4) * 4
-                for p in [r1, r2]:
-                    subprocess.run(
-                        f'head -n {min_lines} "{p}" > "{p}.tmp" && mv "{p}.tmp" "{p}"',
-                        shell=True,
-                    )
-        # Handle single-end with _1 suffix
-        elif r1.exists() and not r2.exists():
-            se = work / f"{accession}.fastq"
-            r1.rename(se)
-
-    except Exception:
-        pass  # prefetch is best-effort
 IS_NATIVE_WINDOWS = platform.system() == "Windows" and "microsoft" not in platform.release().lower()
 
 # Handle to the currently running subprocess (for pause/resume)
@@ -634,16 +552,44 @@ def _count_plastic_by_target(hits_file: Path, annot_path: Path, out_file: Path):
             f.write(f"{target}\t{count}\n")
 
 
+
+def _count_unified_hits(hits_file: Path, map_path: Path, counts_file: Path) -> int:
+    """Count hits per gene family from unified v2 DIAMOND output."""
+    if not hits_file.exists() or hits_file.stat().st_size == 0:
+        counts_file.write_text("gene_family\thit_count\n")
+        return 0
+
+    gene_map = {}
+    if map_path.exists():
+        with open(map_path) as f:
+            for line in f:
+                parts = line.strip().split("\t", 1)
+                if len(parts) == 2:
+                    gene_map[parts[0]] = parts[1]
+
+    counts = {}
+    with open(hits_file) as f:
+        for line in f:
+            cols = line.strip().split("\t")
+            if len(cols) < 2:
+                continue
+            sid = cols[1]
+            gene = gene_map.get(sid, "unknown")
+            counts[gene] = counts.get(gene, 0) + 1
+
+    with open(counts_file, "w") as f:
+        f.write("gene_family\thit_count\n")
+        for gene, count in sorted(counts.items(), key=lambda x: -x[1]):
+            f.write(f"{gene}\t{count}\n")
+
+    return sum(counts.values())
+
 def collect_result_files(accession: str) -> list[Path]:
     """Collect the output TSV files for an accession."""
     results = []
     for pattern in [
         f"{accession}_stats.tsv",
-        f"{accession}_ncyc_counts.tsv",
-        f"{accession}_plastic_counts.tsv",
-        f"{accession}_plastic_by_target.tsv",
-        f"{accession}_extN_counts.tsv",
-        f"{accession}_func_counts.tsv",
+        f"{accession}_unified_counts.tsv",
     ]:
         f = config.RESULTS_DIR / pattern
         if f.exists():

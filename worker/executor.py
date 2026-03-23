@@ -142,7 +142,8 @@ def _diamond_settings() -> tuple[str, str]:
     # Our databases are small (~240 MB total), so always use index-chunks 1
     # to load the full index into RAM once. This avoids repeated disk reads
     # which are catastrophically slow on HDDs.
-    return "2.0", "1"
+    block_size = os.environ.get("BLOCK_SIZE", "2.0")
+    return block_size, "1"
 
 
 def _find_tool(name: str) -> str:
@@ -198,6 +199,7 @@ def _run_bash(accession: str) -> tuple[bool, int, str, dict | None]:
         "THREADS": str(config.THREADS),
         "BLOCK_SIZE": block_size,
         "INDEX_CHUNKS": index_chunks,
+        "PREFER_SRA": os.environ.get("PREFER_SRA", "0"),
     }
 
     start = time.time()

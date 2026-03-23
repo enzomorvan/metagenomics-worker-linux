@@ -135,7 +135,7 @@ if [[ ${ENA_OK} -ne 1 ]]; then
         if prefetch "${ACCESSION}" --output-directory "${WORK_DIR}" --max-size 50G 2>&1 | tail -5; then
             SRA_FILE="${WORK_DIR}/${ACCESSION}/${ACCESSION}.sra"
             if [[ -f "${SRA_FILE}" ]]; then
-                fasterq-dump "${SRA_FILE}" --outdir "${WORK_DIR}" --split-3 --skip-technical --threads "${THREADS}" 2>&1 | tail -5
+                fasterq-dump "${SRA_FILE}" --outdir "${WORK_DIR}" --temp "${WORK_DIR}" --split-3 --skip-technical --threads "${THREADS}" 2>&1 | tail -5
             fi
             rm -rf "${WORK_DIR}/${ACCESSION}"
         fi

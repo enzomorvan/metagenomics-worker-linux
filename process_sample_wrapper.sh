@@ -78,6 +78,10 @@ echo "  Streaming from ENA (first ${SUBSAMPLE_READS} reads per mate)..."
 ENA_RESP=$(curl -sf "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=fastq_ftp" 2>/dev/null)
 if [[ -n "${ENA_RESP}" ]]; then
     ENA_URLS=$(echo "${ENA_RESP}" | tail -1 | cut -f2 | tr ';' ' ')
+    if [[ -z "${ENA_URLS}" ]]; then
+        echo "  No FASTQ URLs on ENA for ${ACCESSION}"
+        ENA_OK=-1
+    fi
     STREAM_LINES=$(( SUBSAMPLE_READS * 4 * 2 ))
     for URL in ${ENA_URLS}; do
         FNAME=$(basename "${URL}" .gz)
@@ -86,6 +90,8 @@ if [[ -n "${ENA_RESP}" ]]; then
         FLINES=$(wc -l < "${WORK_DIR}/${FNAME}")
         if [[ ${FLINES} -lt 4 ]]; then
             echo "  WARNING: ${FNAME} is empty or failed"
+            rm -f "${WORK_DIR}/${FNAME}"
+            ENA_OK=-1
             break
         fi
         FLINES_CLEAN=$(( (FLINES / 4) * 4 ))
@@ -109,10 +115,12 @@ if [[ -n "${ENA_RESP}" ]]; then
             mv "${WORK_DIR}/${ACCESSION}_2.fastq.tmp" "${WORK_DIR}/${ACCESSION}_2.fastq"
         fi
     fi
-    ENA_OK=1
+    if [[ ${ENA_OK} -ne -1 ]]; then
+        ENA_OK=1
+    fi
 fi
 
-if [[ ${ENA_OK} -eq 0 ]]; then
+if [[ ${ENA_OK} -ne 1 ]]; then
     if command -v prefetch &>/dev/null && command -v fasterq-dump &>/dev/null; then
         echo "  ENA failed, trying SRA toolkit..."
         if prefetch "${ACCESSION}" --output-directory "${WORK_DIR}" --max-size 50G 2>&1 | tail -5; then
@@ -134,6 +142,10 @@ echo "  Download time: $(( STEP1_END - STEP1_START ))s"
 if [[ -f "${WORK_DIR}/${ACCESSION}_1.fastq" ]] && [[ -f "${WORK_DIR}/${ACCESSION}_2.fastq" ]]; then
     LAYOUT="paired"
     echo "  Layout: paired-end"
+elif [[ -f "${WORK_DIR}/${ACCESSION}_1.fastq" ]] && [[ ! -f "${WORK_DIR}/${ACCESSION}_2.fastq" ]]; then
+    mv "${WORK_DIR}/${ACCESSION}_1.fastq" "${WORK_DIR}/${ACCESSION}.fastq"
+    LAYOUT="single"
+    echo "  Layout: single-end (renamed from _1)"
 elif [[ -f "${WORK_DIR}/${ACCESSION}.fastq" ]]; then
     LAYOUT="single"
     echo "  Layout: single-end"

@@ -127,7 +127,10 @@ def send_heartbeat(worker_id: str) -> bool:
 
 def claim_task(worker_id: str) -> dict | None:
     """Claim next pending task. Returns task dict or None."""
-    resp = _get_session().post(api_url("/api/tasks/claim"), json={"worker_id": worker_id})
+    body = {"worker_id": worker_id}
+    if config.MAX_SAMPLE_SIZE_MB:
+        body["max_size_mb"] = config.MAX_SAMPLE_SIZE_MB
+    resp = _get_session().post(api_url("/api/tasks/claim"), json=body)
     resp.raise_for_status()
     return resp.json().get("task")
 

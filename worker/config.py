@@ -14,5 +14,6 @@ LOGS_DIR = BASE_DIR / "logs"
 
 THREADS = int(os.environ.get("THREADS", "12"))
 MIN_DISK_GB = int(os.environ.get("MIN_DISK_GB", "30"))
+MAX_SAMPLE_SIZE_MB = int(os.environ.get("MAX_SAMPLE_SIZE_MB", "0")) or None  # 0 = no limit
 POLL_INTERVAL_S = 30
 HEARTBEAT_INTERVAL_S = 60

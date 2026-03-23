@@ -74,6 +74,14 @@ STEP1_START=$(date +%s)
 echo "=== [${ACCESSION}] Step 1: Downloading reads ==="
 
 ENA_OK=0
+
+# PREFER_SRA=1 skips ENA and goes straight to SRA toolkit (for networks where ENA is blocked)
+if [[ "${PREFER_SRA:-0}" == "1" ]] && command -v prefetch &>/dev/null; then
+    echo "  Using SRA toolkit (PREFER_SRA=1)..."
+    ENA_OK=-1
+fi
+
+if [[ ${ENA_OK} -eq 0 ]]; then
 echo "  Streaming from ENA (first ${SUBSAMPLE_READS} reads per mate)..."
 ENA_RESP=$(curl -sf "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${ACCESSION}&result=read_run&fields=fastq_ftp" 2>/dev/null)
 if [[ -n "${ENA_RESP}" ]]; then
@@ -119,6 +127,7 @@ if [[ -n "${ENA_RESP}" ]]; then
         ENA_OK=1
     fi
 fi
+fi  # end of ENA_OK==0 check (PREFER_SRA skips this)
 
 if [[ ${ENA_OK} -ne 1 ]]; then
     if command -v prefetch &>/dev/null && command -v fasterq-dump &>/dev/null; then

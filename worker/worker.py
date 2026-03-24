@@ -190,7 +190,7 @@ def main():
                 pass  # prefetch is best-effort
 
         # Execute
-        success, duration_s, error, step_timings = run_sample(accession)
+        success, duration_s, error, step_timings = run_sample(accession, study=study)
 
         # Wait for prefetch to finish if still running
         if _prefetch_thread and _prefetch_thread.is_alive():

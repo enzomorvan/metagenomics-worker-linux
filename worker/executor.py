@@ -9,85 +9,8 @@ from pathlib import Path
 from . import config
 
 WRAPPER_SCRIPT = Path(__file__).resolve().parent.parent / "process_sample_wrapper.sh"
+MT_WRAPPER_SCRIPT = Path(__file__).resolve().parent.parent / "process_sample_mt_wrapper.sh"
 IS_NATIVE_WINDOWS = platform.system() == "Windows" and "microsoft" not in platform.release().lower()
-SUBSAMPLE_READS = 2500000
-
-
-def prefetch_sample(accession: str):
-    """Pre-download FASTQ files for a sample via ENA streaming.
-
-    Downloads to the workdir so the bash wrapper can skip its download step.
-    Runs in a background thread — errors are silently ignored (wrapper will
-    download if prefetch failed).
-    """
-    import requests
-
-    work = config.WORK_DIR / f"tmp_{accession}"
-    work.mkdir(parents=True, exist_ok=True)
-
-    if any(work.glob(f"{accession}*.fastq")):
-        return
-
-    try:
-        resp = requests.get(
-            f"https://www.ebi.ac.uk/ena/portal/api/filereport"
-            f"?accession={accession}&result=read_run&fields=fastq_ftp",
-            timeout=30,
-        )
-        resp.raise_for_status()
-        lines = resp.text.strip().split("\n")
-        if len(lines) < 2:
-            return
-        ftp_field = lines[1].split("\t")[1]
-        urls = [u.strip() for u in ftp_field.split(";") if u.strip()]
-        if not urls:
-            return
-
-        stream_lines = SUBSAMPLE_READS * 4 * 2
-        for url in urls:
-            filename = url.split("/")[-1].replace(".gz", "")
-            out_path = work / filename
-            if out_path.exists():
-                continue
-            http_url = "https://" + url
-            proc = subprocess.Popen(
-                f'curl -sf "{http_url}" | gunzip -c | head -n {stream_lines}',
-                shell=True, stdout=open(out_path, "w"), stderr=subprocess.DEVNULL,
-            )
-            proc.wait()
-            with open(out_path) as f:
-                total = sum(1 for _ in f)
-            clean = (total // 4) * 4
-            if clean < 4:
-                out_path.unlink(missing_ok=True)
-                continue
-            if clean < total:
-                subprocess.run(
-                    f'head -n {clean} "{out_path}" > "{out_path}.tmp" && mv "{out_path}.tmp" "{out_path}"',
-                    shell=True,
-                )
-
-        r1 = work / f"{accession}_1.fastq"
-        r2 = work / f"{accession}_2.fastq"
-        if r1.exists() and r2.exists():
-            with open(r1) as f:
-                r1_lines = sum(1 for _ in f)
-            with open(r2) as f:
-                r2_lines = sum(1 for _ in f)
-            if r1_lines != r2_lines:
-                min_lines = min(r1_lines, r2_lines)
-                min_lines = (min_lines // 4) * 4
-                for p in [r1, r2]:
-                    subprocess.run(
-                        f'head -n {min_lines} "{p}" > "{p}.tmp" && mv "{p}.tmp" "{p}"',
-                        shell=True,
-                    )
-        elif r1.exists() and not r2.exists():
-            se = work / f"{accession}.fastq"
-            r1.rename(se)
-
-    except Exception:
-        pass  # prefetch is best-effort
 
 # Handle to the currently running subprocess (for pause/resume)
 _current_proc: subprocess.Popen | None = None
@@ -142,8 +65,7 @@ def _diamond_settings() -> tuple[str, str]:
     # Our databases are small (~240 MB total), so always use index-chunks 1
     # to load the full index into RAM once. This avoids repeated disk reads
     # which are catastrophically slow on HDDs.
-    block_size = os.environ.get("BLOCK_SIZE", "2.0")
-    return block_size, "1"
+    return "2.0", "1"
 
 
 def _find_tool(name: str) -> str:
@@ -155,10 +77,11 @@ def _find_tool(name: str) -> str:
     return name + ext
 
 
-def run_sample(accession: str) -> tuple[bool, int, str, dict | None]:
-    """Run the metagenomics pipeline for a single accession.
+def run_sample(accession: str, study: str = "") -> tuple[bool, int, str, dict | None]:
+    """Run the metagenomics/metatranscriptomics pipeline for a single accession.
 
     Uses bash wrapper on Linux/WSL, native Python orchestration on Windows.
+    If study ends with '_mt', uses the MT wrapper (with rRNA removal).
     Returns (success, duration_seconds, error_message, step_timings).
     """
     config.WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -168,7 +91,7 @@ def run_sample(accession: str) -> tuple[bool, int, str, dict | None]:
     if IS_NATIVE_WINDOWS:
         return _run_native_windows(accession)
     else:
-        return _run_bash(accession)
+        return _run_bash(accession, study=study)
 
 
 def _parse_step_timings(log_file: Path) -> dict | None:
@@ -183,11 +106,14 @@ def _parse_step_timings(log_file: Path) -> dict | None:
     return None
 
 
-def _run_bash(accession: str) -> tuple[bool, int, str, dict | None]:
+def _run_bash(accession: str, study: str = "") -> tuple[bool, int, str, dict | None]:
     """Run via bash wrapper (Linux/WSL/macOS)."""
     global _current_proc
     log_file = config.LOGS_DIR / f"{accession}.log"
     block_size, index_chunks = _diamond_settings()
+
+    # Select MT or MG wrapper based on study name
+    wrapper = str(MT_WRAPPER_SCRIPT) if study.endswith("_mt") else str(WRAPPER_SCRIPT)
 
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/usr/local/bin"),
@@ -206,7 +132,7 @@ def _run_bash(accession: str) -> tuple[bool, int, str, dict | None]:
     try:
         with open(log_file, "w") as lf:
             _current_proc = subprocess.Popen(
-                ["bash", str(WRAPPER_SCRIPT), accession],
+                ["bash", wrapper, accession],
                 env=env, stdout=lf, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )

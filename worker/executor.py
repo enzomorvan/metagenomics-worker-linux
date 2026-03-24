@@ -11,6 +11,84 @@ from . import config
 WRAPPER_SCRIPT = Path(__file__).resolve().parent.parent / "process_sample_wrapper.sh"
 MT_WRAPPER_SCRIPT = Path(__file__).resolve().parent.parent / "process_sample_mt_wrapper.sh"
 IS_NATIVE_WINDOWS = platform.system() == "Windows" and "microsoft" not in platform.release().lower()
+SUBSAMPLE_READS = 2500000
+
+
+def prefetch_sample(accession: str):
+    """Pre-download FASTQ files for a sample via ENA streaming.
+
+    Downloads to the workdir so the bash wrapper can skip its download step.
+    Runs in a background thread — errors are silently ignored.
+    """
+    import requests
+
+    work = config.WORK_DIR / f"tmp_{accession}"
+    work.mkdir(parents=True, exist_ok=True)
+
+    if any(work.glob(f"{accession}*.fastq")):
+        return
+
+    try:
+        resp = requests.get(
+            f"https://www.ebi.ac.uk/ena/portal/api/filereport"
+            f"?accession={accession}&result=read_run&fields=fastq_ftp",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        lines = resp.text.strip().split("\n")
+        if len(lines) < 2:
+            return
+        ftp_field = lines[1].split("\t")[1]
+        urls = [u.strip() for u in ftp_field.split(";") if u.strip()]
+        if not urls:
+            return
+
+        stream_lines = SUBSAMPLE_READS * 4 * 2
+        for url in urls:
+            filename = url.split("/")[-1].replace(".gz", "")
+            out_path = work / filename
+            if out_path.exists():
+                continue
+            http_url = "https://" + url
+            proc = subprocess.Popen(
+                f'curl -sf "{http_url}" | gunzip -c | head -n {stream_lines}',
+                shell=True, stdout=open(out_path, "w"), stderr=subprocess.DEVNULL,
+            )
+            proc.wait()
+            with open(out_path) as f:
+                total = sum(1 for _ in f)
+            clean = (total // 4) * 4
+            if clean < 4:
+                out_path.unlink(missing_ok=True)
+                continue
+            if clean < total:
+                subprocess.run(
+                    f'head -n {clean} "{out_path}" > "{out_path}.tmp" && mv "{out_path}.tmp" "{out_path}"',
+                    shell=True,
+                )
+
+        r1 = work / f"{accession}_1.fastq"
+        r2 = work / f"{accession}_2.fastq"
+        if r1.exists() and r2.exists():
+            with open(r1) as f:
+                r1_lines = sum(1 for _ in f)
+            with open(r2) as f:
+                r2_lines = sum(1 for _ in f)
+            if r1_lines != r2_lines:
+                min_lines = min(r1_lines, r2_lines)
+                min_lines = (min_lines // 4) * 4
+                for p in [r1, r2]:
+                    subprocess.run(
+                        f'head -n {min_lines} "{p}" > "{p}.tmp" && mv "{p}.tmp" "{p}"',
+                        shell=True,
+                    )
+        elif r1.exists() and not r2.exists():
+            se = work / f"{accession}.fastq"
+            r1.rename(se)
+
+    except Exception:
+        pass
+
 
 # Handle to the currently running subprocess (for pause/resume)
 _current_proc: subprocess.Popen | None = None

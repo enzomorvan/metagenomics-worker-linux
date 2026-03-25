@@ -130,6 +130,8 @@ def claim_task(worker_id: str) -> dict | None:
     body = {"worker_id": worker_id, "include_mt": True}
     if config.MAX_SAMPLE_SIZE_MB:
         body["max_size_mb"] = config.MAX_SAMPLE_SIZE_MB
+    if hasattr(config, 'PREFER_SIZE') and config.PREFER_SIZE:
+        body["prefer_size"] = config.PREFER_SIZE
     resp = _get_session().post(api_url("/api/tasks/claim"), json=body)
     resp.raise_for_status()
     return resp.json().get("task")
